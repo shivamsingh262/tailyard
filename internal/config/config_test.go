@@ -1,11 +1,13 @@
 package config
 
 import (
+	"path/filepath"
 	"strings"
 	"testing"
 )
 
 func TestParseDefaults(t *testing.T) {
+	dir := filepath.FromSlash("/work/app")
 	cfg, err := Parse([]byte(`
 compose:
   dir: backend
@@ -18,17 +20,17 @@ sources:
 proxy:
   target: http://localhost:3000
 redis: {}
-`), "/work/app")
+`), dir)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if cfg.Name != "app" {
 		t.Errorf("name = %q, want app", cfg.Name)
 	}
-	if cfg.Compose.Dir != "/work/app/backend" || !*cfg.Compose.Up || !*cfg.Compose.StopOnQuit {
+	if cfg.Compose.Dir != filepath.Join(dir, "backend") || !*cfg.Compose.Up || !*cfg.Compose.StopOnQuit {
 		t.Errorf("compose defaults wrong: %+v", cfg.Compose)
 	}
-	if cfg.Sources[1].Dir != "/work/app/frontend" || cfg.Sources[0].Parser != "auto" {
+	if cfg.Sources[1].Dir != filepath.Join(dir, "frontend") || cfg.Sources[0].Parser != "auto" {
 		t.Errorf("source defaults wrong: %+v", cfg.Sources)
 	}
 	if cfg.Proxy.MaxBodyBytes != 512<<10 || cfg.Proxy.Listen == "" {
