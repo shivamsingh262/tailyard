@@ -1,5 +1,10 @@
 # tailyard
 
+[![ci](https://github.com/shivamsingh262/tailyard/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/shivamsingh262/tailyard/actions/workflows/ci.yml)
+[![release](https://img.shields.io/github/v/release/shivamsingh262/tailyard)](https://github.com/shivamsingh262/tailyard/releases)
+[![Go Reference](https://pkg.go.dev/badge/github.com/shivamsingh262/tailyard.svg)](https://pkg.go.dev/github.com/shivamsingh262/tailyard)
+[![license](https://img.shields.io/github/license/shivamsingh262/tailyard)](LICENSE)
+
 One terminal for your whole local dev stack: every log stream, every HTTP request with its bodies, the browser console, and your Redis queues, side by side and filterable by request id.
 
 ```
