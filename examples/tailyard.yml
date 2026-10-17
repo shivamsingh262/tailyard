@@ -1,0 +1,94 @@
+# tailyard.yml: what to run and watch. Every section is optional.
+# Relative paths resolve against this file's folder; ${VAR} reads the environment.
+
+name: myapp            # shown in the header (default: this folder's name)
+# theme: light         # for a light terminal background
+# open_url: http://localhost:8899   # what `o` opens (default: the proxy, else a dev server's URL)
+
+# A docker compose project. tailyard runs `up -d` on start and `stop` on q
+# (d detaches and leaves it running).
+compose:
+  dir: .
+  files: [docker-compose.yml]
+  # project: myapp
+  # up: false            # only follow containers that are already running
+  # build: true          # `up -d --build` on start
+  # stop_on_quit: false
+  # tail: 300            # history lines per service on start
+
+# Log sources, one tab each unless `tabs` says otherwise. Each one sets
+# exactly one of: compose (a service to follow), command (a process
+# tailyard starts and owns), file (a file to tail).
+#
+# parser: auto (default; JSON logs, access lines, LEVEL: prefixes, tracebacks),
+# json, python, postgres, redis, plain.
+sources:
+  - name: api
+    compose: api
+    health: http://localhost:8000/health   # 5xx or no answer turns the header dot red
+
+  - name: worker
+    compose: worker
+
+  - name: web
+    command: npm run dev
+    dir: ../frontend
+    env:
+      BROWSER: none
+
+  - name: db
+    compose: postgres
+    parser: postgres
+
+  # - name: app
+  #   file: ./log/development.log
+
+# A recording reverse proxy. Open the app through `listen` instead of the
+# target, and every request shows in the HTTP tab with its bodies.
+# Put it in front of your frontend dev server if that proxies the API, so
+# both page loads and API calls go through it.
+proxy:
+  listen: 127.0.0.1:8899
+  target: http://localhost:5173
+  # record: [/api/]        # path prefixes to record (default: all but static assets)
+  # max_body: 512KB
+  # redact: [password, token, secret]   # key substrings to mask (a sensible default list applies)
+  inject_console: true     # forward the browser console to a Browser tab (HTML pages only)
+
+# Queue backlog, memory, key prefixes, MONITOR on `m`.
+redis:
+  addr: 127.0.0.1:6379
+  # password: ${REDIS_PASSWORD}
+  # streams:               # default: discover streams and their consumer groups
+  #   - stream: jobs
+  #     group: workers
+  #   - stream: jobs:dead
+  #     alert: true        # any entry here is a problem
+  # tail: "events:*"       # follow the newest matching stream; with an id pinned, "events:<id>"
+
+# Ties entries across sources to one id. `f` pins an id and filters every tab to it.
+correlation:
+  label: request
+  keys: [request_id, trace_id]        # JSON log fields and query parameters
+  # pattern: 'runs/([0-9a-f-]{36})'   # for plain text; group 1 is the id
+
+# tabs:                    # default: one per source, then HTTP, Browser, Redis, System, All
+#   - name: Backend
+#     sources: [api, worker]
+#   - name: Everything
+#     sources: [api, worker, web, http, browser, events, tailyard]
+
+# Keys for things you do often. Each sets one of run (a shell command, run in
+# this folder), compose (docker compose arguments) or restart (a command source).
+actions:
+  - key: r
+    label: restart worker
+    compose: [restart, worker]
+  - key: b
+    label: rebuild images
+    compose: [up, -d, --build]
+  - key: v
+    restart: web
+  # - key: M
+  #   label: migrate
+  #   run: docker compose exec -T api alembic upgrade head

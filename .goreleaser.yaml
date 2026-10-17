@@ -1,0 +1,72 @@
+# Builds and publishes a release when a v* tag is pushed (see
+# .github/workflows/release.yml). Dry run locally with:
+#   goreleaser release --snapshot --clean
+version: 2
+
+project_name: tailyard
+
+before:
+  hooks:
+    - go mod tidy
+    - go test ./...
+
+builds:
+  - env:
+      - CGO_ENABLED=0
+    goos: [darwin, linux, windows]
+    goarch: [amd64, arm64]
+    flags:
+      - -trimpath
+    ldflags:
+      - -s -w -X main.version={{ .Version }}
+    mod_timestamp: "{{ .CommitTimestamp }}"
+
+archives:
+  - formats: [tar.gz]
+    format_overrides:
+      - goos: windows
+        formats: [zip]
+    files:
+      - README.md
+      - LICENSE
+      - examples/tailyard.yml
+
+checksum:
+  name_template: checksums.txt
+
+changelog:
+  sort: asc
+  filters:
+    exclude:
+      - "^docs:"
+      - "^test:"
+      - "^ci:"
+
+release:
+  github:
+    owner: shivamsingh262
+    name: tailyard
+  prerelease: auto # v0.2.0-rc.1 and the like are marked as prereleases
+
+homebrew_casks:
+  - name: tailyard
+    repository:
+      owner: shivamsingh262
+      name: homebrew-tap
+      token: "{{ .Env.HOMEBREW_TAP_GITHUB_TOKEN }}"
+    directory: Casks
+    homepage: https://github.com/shivamsingh262/tailyard
+    description: One terminal for your local dev stack's logs, HTTP traffic and Redis queues
+    license: MIT
+    commit_author:
+      name: goreleaserbot
+      email: bot@goreleaser.com
+    skip_upload: auto # prereleases don't update the tap
+    hooks:
+      post:
+        # The binaries aren't notarized; without this, macOS refuses to run
+        # one installed by Homebrew.
+        install: |
+          if OS.mac?
+            system_command "/usr/bin/xattr", args: ["-dr", "com.apple.quarantine", "#{staged_path}/tailyard"]
+          end
