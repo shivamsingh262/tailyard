@@ -32,6 +32,7 @@ type Line struct {
 	Detail []string
 	Access bool     // a 2xx/3xx access-log line, hidden by the "hide OK requests" toggle
 	Req    *Request // set for HTTP requests; rendered in columns instead of Text
+	LLM    *LLMCall // set for LLM API calls; rendered in columns instead of Text
 }
 
 // Request holds an HTTP request's fields so rows can be laid out in columns

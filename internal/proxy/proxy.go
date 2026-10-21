@@ -328,7 +328,7 @@ func (c *cappedBuffer) truncated() bool { return c.total > int64(c.buf.Len()) }
 // body is finished: at EOF, on a read error, or when closed early.
 type teeBody struct {
 	rc   io.ReadCloser
-	buf  *cappedBuffer
+	buf  interface{ Write([]byte) } // a cappedBuffer, or the LLM proxy's stream parser
 	done func()
 }
 

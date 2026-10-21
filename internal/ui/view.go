@@ -91,6 +91,9 @@ func (m *Model) statusBar() string {
 	if len(services) > 0 {
 		parts = append(parts, strings.Join(services, "  "))
 	}
+	if badge := m.llm.badge(); badge != "" {
+		parts = append(parts, badge)
+	}
 	if badge := m.redisBadge(); badge != "" {
 		parts = append(parts, badge)
 	}
@@ -189,8 +192,11 @@ func (m *Model) stampOf(l logs.Line) string {
 // entryText is an entry's message: request rows are laid out in columns,
 // everything else uses its pre-styled Text.
 func entryText(l logs.Line, pathWidth int) string {
-	if l.Req != nil {
+	switch {
+	case l.Req != nil:
 		return renderRequest(l.Req, pathWidth)
+	case l.LLM != nil:
+		return renderLLM(l.LLM, pathWidth)
 	}
 	return l.Text
 }
@@ -239,7 +245,7 @@ func (m *Model) renderLine(t *tab, l logs.Line, width, pathWidth int, selected, 
 		row += theme.Source(l.Src).Render(fmt.Sprintf("%-9s", ansi.Truncate(l.Src, 9, "…"))) + " "
 	}
 	text := entryText(l, pathWidth)
-	if l.Req == nil {
+	if l.Req == nil && l.LLM == nil {
 		row += levelBadge(l.Level) + " "
 	} else if l.Level == logs.LDebug {
 		text = theme.Dim.Render(ansi.Strip(text))
@@ -290,6 +296,9 @@ func (m *Model) bodyRows(width, height int) []string {
 		if l.Req != nil {
 			pathWidth = max(pathWidth, min(requestPathWidth(l.Req), 40))
 		}
+		if l.LLM != nil {
+			pathWidth = max(pathWidth, min(llmModelWidth(l.LLM), 28))
+		}
 	}
 	t.visible = len(entries)
 	if used > height && len(entries) > 1 {
@@ -324,6 +333,8 @@ func (m *Model) emptyHint(t *tab) string {
 		return " — requests through " + m.app.Proxy.URL() + " show here"
 	case t.srcs[config.SrcBrowser] && len(t.srcs) == 1 && m.app.Proxy != nil:
 		return " — open the app through " + m.app.Proxy.URL() + "; its console shows here"
+	case t.srcs[config.SrcLLM] && len(t.srcs) == 1 && m.cfg.LLM != nil:
+		return " — LLM calls sent to " + m.cfg.LLM.URL() + "/<provider> show here"
 	}
 	return ""
 }
@@ -345,6 +356,9 @@ func (m *Model) detailRows(l logs.Line, width int) []string {
 		if l.Req.Ms >= 0 {
 			text += "  " + theme.Duration(l.Req.Ms).Render(fmt.Sprintf("%dms", l.Req.Ms))
 		}
+	}
+	if l.LLM != nil {
+		text = renderLLM(l.LLM, 0)
 	}
 	rows := []string{header}
 	rows = append(rows, strings.Split(ansi.Hardwrap(text, width, true), "\n")...)

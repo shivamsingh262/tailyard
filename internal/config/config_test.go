@@ -118,3 +118,77 @@ func TestParseSize(t *testing.T) {
 		t.Error("expected an error")
 	}
 }
+
+func TestLLMDefaultsAndEnv(t *testing.T) {
+	cfg, err := Parse([]byte(`
+sources:
+  - name: api
+    command: uvicorn app:app
+  - name: worker
+    command: python worker.py
+    env:
+      OPENAI_BASE_URL: http://my-gateway/v1
+  - name: db
+    file: db.log
+llm:
+  providers:
+    - name: anthropic
+    - name: openai
+    - name: ollama
+`), "/w")
+	if err != nil {
+		t.Fatal(err)
+	}
+	l := cfg.LLM
+	if l.Listen != "127.0.0.1:8898" || !*l.SetEnv || l.MaxBodyBytes != 2<<20 {
+		t.Errorf("llm defaults wrong: %+v", l)
+	}
+	if p := l.Providers[2]; p.API != "openai" || p.Upstream != "http://localhost:11434/v1" || p.Env != "" {
+		t.Errorf("ollama provider: %+v", p)
+	}
+	api, _ := cfg.Source("api")
+	if got := strings.Join(cfg.LLMEnv(api), " "); got != "ANTHROPIC_BASE_URL=http://127.0.0.1:8898/anthropic OPENAI_BASE_URL=http://127.0.0.1:8898/openai" {
+		t.Errorf("api env = %s", got)
+	}
+	worker, _ := cfg.Source("worker")
+	if got := strings.Join(cfg.LLMEnv(worker), " "); got != "ANTHROPIC_BASE_URL=http://127.0.0.1:8898/anthropic" {
+		t.Errorf("a source's own env must win: %s", got)
+	}
+	db, _ := cfg.Source("db")
+	if cfg.LLMEnv(db) != nil {
+		t.Error("only command sources get the env")
+	}
+	var names []string
+	for _, tab := range cfg.Tabs {
+		names = append(names, tab.Name)
+	}
+	if got := strings.Join(names, ","); got != "Api,Worker,Db,LLM,System,All" {
+		t.Errorf("default tabs = %s", got)
+	}
+}
+
+func TestLLMErrors(t *testing.T) {
+	_, err := Parse([]byte(`
+proxy:
+  target: http://localhost:3000
+  listen: 127.0.0.1:9000
+llm:
+  listen: 127.0.0.1:9000
+  set_env: false
+  providers:
+    - name: mine
+    - name: anthropic
+    - name: anthropic
+    - name: a/b
+      api: openai
+      upstream: http://x
+`), "/w")
+	if err == nil {
+		t.Fatal("expected errors")
+	}
+	for _, want := range []string{"already the proxy's address", `provider "mine": api must be one of`, `"anthropic" is defined twice`, "can't contain"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error missing %q:\n%v", want, err)
+		}
+	}
+}

@@ -55,6 +55,7 @@ var (
 		"browser":  color("214", "130"),
 		"events":   color("43", "29"),
 		"monitor":  color("244", "244"),
+		"llm":      color("177", "91"),
 		"tailyard": color("250", "240"),
 	}
 	sourceIndex = map[string]int{}

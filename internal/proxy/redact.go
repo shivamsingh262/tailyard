@@ -11,12 +11,24 @@ const mask = "[redacted]"
 
 func sensitive(key string, redact []string) bool {
 	k := strings.ToLower(key)
+	if isTokenCount(k) {
+		return false
+	}
 	for _, r := range redact {
 		if strings.Contains(k, strings.ToLower(r)) {
 			return true
 		}
 	}
 	return false
+}
+
+// isTokenCount reports whether a key holds a count of LLM tokens
+// (max_tokens, input_tokens, promptTokenCount) rather than a credential.
+func isTokenCount(k string) bool {
+	if strings.Contains(k, "access") || strings.Contains(k, "refresh") || strings.Contains(k, "id_token") {
+		return false
+	}
+	return strings.HasSuffix(k, "tokens") || strings.HasSuffix(k, "tokencount") || strings.HasSuffix(k, "token_count")
 }
 
 // redactJSON masks values under sensitive keys at any depth. Bodies that

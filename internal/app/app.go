@@ -34,6 +34,7 @@ type App struct {
 	Lines   chan logs.Line
 	Redis   *redismon.Monitor // nil without a redis section
 	Proxy   *proxy.Proxy      // nil without a proxy section
+	LLM     *proxy.LLMProxy   // nil without an llm section
 	Corr    *logs.Correlator
 
 	closing atomic.Bool
@@ -95,6 +96,13 @@ func New(cfg *config.Config) (*App, error) {
 		}
 		a.Proxy = p
 	}
+	if cfg.LLM != nil {
+		p, err := proxy.NewLLM(cfg.LLM, a.Corr, func(l logs.Line) { a.Lines <- l })
+		if err != nil {
+			return nil, err
+		}
+		a.LLM = p
+	}
 	return a, nil
 }
 
@@ -117,6 +125,9 @@ func (a *App) Start() {
 		} else {
 			a.emit(logs.LInfo, fmt.Sprintf("proxy listening on %s → %s", a.Proxy.URL(), a.Cfg.Proxy.Target))
 		}
+	}
+	if a.LLM != nil {
+		a.startLLM()
 	}
 	for _, src := range a.Cfg.Sources {
 		switch src.Kind() {
@@ -304,7 +315,7 @@ func (a *App) RunAction(act config.Action) {
 func (a *App) runCommand(src config.Source) {
 	cmd := shellCommand(src.Command)
 	cmd.Dir = src.Dir
-	cmd.Env = os.Environ()
+	cmd.Env = append(os.Environ(), a.llmEnv(src)...)
 	for k, v := range src.Env {
 		cmd.Env = append(cmd.Env, k+"="+v)
 	}
@@ -607,6 +618,9 @@ func (a *App) Shutdown(stopContainers bool) {
 	if a.Proxy != nil {
 		a.Proxy.Close()
 	}
+	if a.LLM != nil {
+		a.LLM.Close()
+	}
 	if a.Redis != nil {
 		a.Redis.Close()
 	}
@@ -626,4 +640,48 @@ func (a *App) Shutdown(stopContainers bool) {
 	if a.Cfg.ComposeUp() && !a.HungUp.Load() {
 		os.Stdout.WriteString("tailyard: containers are still running. Stop them with:\n  cd " + a.Cfg.Compose.Dir + " && " + a.composeCommandLine() + " stop\n")
 	}
+}
+
+func (a *App) startLLM() {
+	l := a.Cfg.LLM
+	if err := a.LLM.Start(); err != nil {
+		a.emit(logs.LError, "llm proxy: "+err.Error())
+		return
+	}
+	var routes []string
+	for _, p := range l.Providers {
+		routes = append(routes, fmt.Sprintf("%s/%s → %s", l.URL(), p.Name, p.Upstream))
+	}
+	a.emit(logs.LInfo, "llm proxy listening: "+strings.Join(routes, ", "))
+	for _, p := range l.Providers {
+		if p.Env != "" && *l.SetEnv && os.Getenv(p.Env) != "" {
+			a.emit(logs.LWarn, fmt.Sprintf("llm proxy: %s is already set in your environment, so %s calls from command sources keep going to %s", p.Env, p.Name, os.Getenv(p.Env)))
+		}
+	}
+	for _, src := range a.Cfg.Sources {
+		if src.Kind() == "compose" {
+			a.emit(logs.LInfo, fmt.Sprintf("llm proxy: to record calls from containers, listen on 0.0.0.0 and set e.g. ANTHROPIC_BASE_URL=http://host.docker.internal:%s/anthropic in the service", port(l.Listen)))
+			break
+		}
+	}
+}
+
+// llmEnv points a command source's LLM SDKs at the LLM proxy, unless the
+// variable is already set in tailyard's own environment.
+func (a *App) llmEnv(src config.Source) []string {
+	var env []string
+	for _, kv := range a.Cfg.LLMEnv(src) {
+		name, _, _ := strings.Cut(kv, "=")
+		if os.Getenv(name) == "" {
+			env = append(env, kv)
+		}
+	}
+	return env
+}
+
+func port(listen string) string {
+	if i := strings.LastIndex(listen, ":"); i >= 0 {
+		return listen[i+1:]
+	}
+	return listen
 }

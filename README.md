@@ -22,6 +22,7 @@ One terminal for your whole local dev stack: every log stream, every HTTP reques
 - **Reads the logs properly.** JSON logs (zap, zerolog, pino, structlog, slog…), access-log lines laid out as request rows, Python tracebacks and JS stack frames folded into the entry they belong to, Postgres and Redis server logs.
 - **Records HTTP.** A reverse proxy records each request and response with query, bodies (gzip decoded, JSON pretty-printed) and timing, and masks passwords and tokens.
 - **Captures the browser console.** The proxy can inject a small script into your HTML pages that forwards `console.*`, uncaught errors and unhandled rejections.
+- **Records LLM calls.** A second proxy sits between your code and the Anthropic or OpenAI API (or any OpenAI-compatible server). Each call shows the model, stop reason, tokens, cache hits, time to first token and cost, and calls that hit the output cap, were refused or were answered by a different model stand out.
 - **Watches Redis.** Streams and consumer groups are discovered automatically and shown with length, pending, lag, oldest-pending age and consumers. It also shows memory, key prefixes, a live tail of a stream, and `MONITOR` on a key press.
 - **Correlates.** Pin a request, trace or job id with `f`, and every tab shows only what mentions it.
 - **Binds your common commands to keys.** Restart a worker, rebuild images or run migrations without leaving the screen.
@@ -81,9 +82,10 @@ See [`examples/tailyard.yml`](examples/tailyard.yml) for every option.
 | `compose` | A docker compose project: `dir`, `files`, `project`. `up: false` only follows containers that are already running; `build: true` rebuilds on start. |
 | `sources` | Log streams. Each sets one of `compose` (a service), `command` (a shell command tailyard starts, with optional `dir` and `env`) or `file` (tailed like `tail -F`). Optional: `parser` (`auto`, `json`, `python`, `postgres`, `redis`, `plain`) and `health` (a URL; 5xx or no answer shows in the header). |
 | `proxy` | `target` to forward to, `listen` address (default `127.0.0.1:8899`), `record` path prefixes (default: everything except static assets and dev-server internals), `max_body`, `redact` key substrings, `inject_console`. |
+| `llm` | `listen` address (default `127.0.0.1:8898`), `providers` (default `anthropic` and `openai`; also `ollama`, `openrouter`, `groq`, `together`, or any server with `api: openai` and an `upstream`), `set_env`, `max_body`, `redact`, and `prices` in USD per million tokens by model or model prefix. |
 | `redis` | `addr`, `username`, `password`, `db`. `streams` lists stream/group pairs (default: discover them; `alert: true` marks a dead-letter queue). `tail` is a glob such as `events:*`: tailyard follows the newest matching stream, or the pinned id's stream when one exists. |
 | `correlation` | `keys` are JSON log fields and query parameters holding the id; `pattern` is a regex for plain text (group 1 is the id); `label` names it in the UI. |
-| `tabs` | Optional custom tabs, each a `name` and a list of `sources`. Built-in source names: `http`, `browser`, `events`, `monitor`, `tailyard`. |
+| `tabs` | Optional custom tabs, each a `name` and a list of `sources`. Built-in source names: `http`, `browser`, `llm`, `events`, `monitor`, `tailyard`. |
 | `actions` | Keys bound to a `run` shell command, `compose` arguments, or `restart` of a command source. |
 
 `${VAR}` anywhere in the file is replaced from the environment, so secrets can stay out of it.
@@ -114,8 +116,9 @@ Flags: `-config`, `-init`, `-check`, `-build`, `-no-up`, `-keep-running`, `-them
 ## How it works
 
 - **The proxy** is a standard reverse proxy. Requests are recorded only if they go through it, so open the app at the proxy's address. If your frontend dev server proxies `/api` to a backend, put tailyard in front of the dev server: page loads, API calls and HMR all pass through, and the console script can be injected into the pages. WebSockets are forwarded but not recorded. Server-sent event streams are noted but not buffered.
+- **The LLM proxy** forwards `http://127.0.0.1:8898/<provider>/…` to the provider, so an SDK whose base URL is `http://127.0.0.1:8898/anthropic` works unchanged; your API key passes through and is never recorded. tailyard sets `ANTHROPIC_BASE_URL` and `OPENAI_BASE_URL` for the command sources it starts (not if a source or your shell already sets them). For compose services, listen on `0.0.0.0` and set the variable in the service, pointing at `host.docker.internal`. Streams are forwarded chunk by chunk and parsed as they pass. With OpenAI chat streams, set `stream_options: {"include_usage": true}` to get token counts. Calls show in the LLM tab, and the header totals calls, tokens and cost for the session. Each attempt is its own row, so SDK retries after a 429 or 529 show separately.
 - **Console capture** adds `<script src="/__tailyard/console.js">` to the top of `<head>` in HTML responses. It wraps `console.*` and forwards messages in batches to the proxy. Browsers will show the wrapper as the source of console messages; add `/__tailyard/` to DevTools' ignore list to see your own code instead.
-- **Redaction** masks values under keys containing `password`, `secret`, `token`, `api_key`, `authorization` or `cookie` (configurable), in JSON bodies at any depth, form bodies and query strings. Only the recorded copy is masked; your app sees the real traffic.
+- **Redaction** masks values under keys containing `password`, `secret`, `token`, `api_key`, `authorization` or `cookie` (configurable), in JSON bodies at any depth, form bodies and query strings. Token counts such as `max_tokens` are left visible. Only the recorded copy is masked; your app sees the real traffic.
 - **Redis** is sampled every 2 seconds. tailyard names its connections `tailyard` so its own commands are left out of `MONITOR`.
 - **Process control:** commands run under `sh -c` (`cmd /C` on Windows) in their own process group, and quitting stops the whole group. Closing the terminal window counts as `q`.
 
@@ -133,6 +136,7 @@ tailyard is for the local dev loop: the logs, the request that caused them, and 
 ## Limitations
 
 - Only HTTP that goes through the proxy is recorded.
+- LLM calls are recorded only if the SDK honours a base URL. AWS Bedrock signs requests for its own host, so it can't go through the LLM proxy. Realtime (WebSocket) APIs are forwarded but not recorded.
 - Brotli/zstd responses aren't decoded (the proxy asks upstreams for gzip or nothing, so this is rare).
 - `MONITOR` slows Redis down; it is off until you press `m`.
 - Windows builds, but process control and the UI are tested mostly on macOS and Linux.
@@ -151,7 +155,7 @@ Releases: push a `v*` tag and [the release workflow](.github/workflows/release.y
 | `internal/config` | `tailyard.yml` schema, defaults and validation |
 | `internal/app` | Compose, commands, file tails, health checks, actions, shutdown |
 | `internal/logs` | The `Line` model and parsers (JSON, access logs, tracebacks, Postgres, Redis), HTTP and console entries |
-| `internal/proxy` | Recording reverse proxy, redaction, console script injection |
+| `internal/proxy` | Recording reverse proxy, redaction, console script injection, and the LLM proxy with its stream parsing |
 | `internal/redismon` | Stream/group stats, stream tail, `MONITOR` |
 | `internal/ui` | Bubble Tea model and rendering |
 | `internal/theme` | Colors for dark and light terminals |

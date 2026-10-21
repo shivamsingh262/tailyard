@@ -24,10 +24,11 @@ const (
 	SrcBrowser = "browser" // browser console, forwarded by the proxy's injected script
 	SrcEvents  = "events"  // the tailed Redis stream
 	SrcMonitor = "monitor" // Redis MONITOR output
+	SrcLLM     = "llm"     // LLM API calls recorded by the LLM proxy
 	SrcSelf    = "tailyard"
 )
 
-var builtinSources = []string{SrcHTTP, SrcBrowser, SrcEvents, SrcMonitor, SrcSelf}
+var builtinSources = []string{SrcHTTP, SrcBrowser, SrcEvents, SrcMonitor, SrcLLM, SrcSelf}
 
 // Keys tailyard binds itself; actions can't use them.
 var reservedKeys = "1234567890qdhjklgGieEsJKtfFaycmo?/ "
@@ -39,6 +40,7 @@ type Config struct {
 	Compose     *Compose    `yaml:"compose"`
 	Sources     []Source    `yaml:"sources"`
 	Proxy       *Proxy      `yaml:"proxy"`
+	LLM         *LLM        `yaml:"llm"`
 	Redis       *Redis      `yaml:"redis"`
 	Correlation Correlation `yaml:"correlation"`
 	Tabs        []Tab       `yaml:"tabs"`
@@ -90,6 +92,49 @@ type Proxy struct {
 	InjectConsole bool     `yaml:"inject_console"`
 
 	MaxBodyBytes int64 `yaml:"-"`
+}
+
+// LLM is a forward proxy for LLM API calls. SDKs reach it through their
+// base-URL setting (ANTHROPIC_BASE_URL, OPENAI_BASE_URL…), which tailyard sets
+// for the command sources it starts.
+type LLM struct {
+	Listen    string           `yaml:"listen"`
+	Providers []LLMProvider    `yaml:"providers"` // default: anthropic and openai
+	SetEnv    *bool            `yaml:"set_env"`   // set base-URL variables for command sources (default true)
+	MaxBody   string           `yaml:"max_body"`  // per body, e.g. 2MB
+	Redact    []string         `yaml:"redact"`
+	Prices    map[string]Price `yaml:"prices"` // USD per million tokens, by model or model prefix
+
+	MaxBodyBytes int64 `yaml:"-"`
+}
+
+// LLMProvider is one upstream API. Requests to /<name>/… on the LLM proxy go
+// to upstream/…, so an SDK's base URL is http://<listen>/<name>.
+type LLMProvider struct {
+	Name     string `yaml:"name"`
+	API      string `yaml:"api"`      // anthropic or openai (also OpenAI-compatible servers)
+	Upstream string `yaml:"upstream"` // e.g. https://api.openai.com/v1
+	Env      string `yaml:"env"`      // variable holding the SDK's base URL; "-" sets none
+}
+
+type Price struct {
+	Input      float64 `yaml:"input"`
+	Output     float64 `yaml:"output"`
+	CacheRead  float64 `yaml:"cache_read"`
+	CacheWrite float64 `yaml:"cache_write"`
+}
+
+// LLMAPIs are the request and response formats the LLM proxy understands.
+var LLMAPIs = []string{"anthropic", "openai"}
+
+// knownProviders fill in api, upstream and env for providers named only.
+var knownProviders = map[string]LLMProvider{
+	"anthropic":  {API: "anthropic", Upstream: "https://api.anthropic.com", Env: "ANTHROPIC_BASE_URL"},
+	"openai":     {API: "openai", Upstream: "https://api.openai.com/v1", Env: "OPENAI_BASE_URL"},
+	"openrouter": {API: "openai", Upstream: "https://openrouter.ai/api/v1"},
+	"groq":       {API: "openai", Upstream: "https://api.groq.com/openai/v1"},
+	"together":   {API: "openai", Upstream: "https://api.together.xyz/v1"},
+	"ollama":     {API: "openai", Upstream: "http://localhost:11434/v1"},
 }
 
 type Redis struct {
@@ -266,6 +311,10 @@ func (c *Config) normalize() error {
 		}
 	}
 
+	if l := c.LLM; l != nil {
+		c.normalizeLLM(l, fail)
+	}
+
 	if r := c.Redis; r != nil && r.Addr == "" {
 		r.Addr = "127.0.0.1:6379"
 	}
@@ -353,6 +402,10 @@ func (c *Config) defaultTabs() []Tab {
 			all = append(all, SrcBrowser)
 		}
 	}
+	if c.LLM != nil {
+		tabs = append(tabs, Tab{Name: "LLM", Sources: []string{SrcLLM}})
+		all = append(all, SrcLLM)
+	}
 	if c.Redis != nil {
 		tabs = append(tabs, Tab{Name: "Redis", Sources: []string{SrcEvents, SrcMonitor}})
 		all = append(all, SrcEvents)
@@ -360,6 +413,85 @@ func (c *Config) defaultTabs() []Tab {
 	tabs = append(tabs, Tab{Name: "System", Sources: []string{SrcSelf}})
 	all = append(all, SrcSelf)
 	return append(tabs, Tab{Name: "All", Sources: all})
+}
+
+func (c *Config) normalizeLLM(l *LLM, fail func(string, ...any)) {
+	if l.Listen == "" {
+		l.Listen = "127.0.0.1:8898"
+	}
+	if c.Proxy != nil && l.Listen == c.Proxy.Listen {
+		fail("llm: listen %s is already the proxy's address", l.Listen)
+	}
+	if l.SetEnv == nil {
+		l.SetEnv = ptr(true)
+	}
+	if l.MaxBody == "" {
+		l.MaxBody = "2MB"
+	}
+	n, err := parseSize(l.MaxBody)
+	if err != nil {
+		fail("llm: max_body: %v", err)
+	}
+	l.MaxBodyBytes = n
+	if l.Redact == nil {
+		l.Redact = []string{"password", "secret", "token", "api_key", "apikey", "authorization"}
+	}
+	if len(l.Providers) == 0 {
+		l.Providers = []LLMProvider{{Name: "anthropic"}, {Name: "openai"}}
+	}
+	seen := map[string]bool{}
+	for i := range l.Providers {
+		p := &l.Providers[i]
+		known := knownProviders[p.Name]
+		if p.API == "" {
+			p.API = known.API
+		}
+		if p.Upstream == "" {
+			p.Upstream = known.Upstream
+		}
+		if p.Env == "" {
+			p.Env = known.Env
+		}
+		if p.Env == "-" {
+			p.Env = ""
+		}
+		p.Upstream = strings.TrimRight(p.Upstream, "/")
+		switch {
+		case p.Name == "" || strings.ContainsAny(p.Name, "/?# "):
+			fail("llm: providers[%d]: name is required and can't contain / ? # or spaces", i)
+		case seen[p.Name]:
+			fail("llm: provider %q is defined twice", p.Name)
+		case !slicesContains(LLMAPIs, p.API):
+			fail("llm: provider %q: api must be one of %s", p.Name, strings.Join(LLMAPIs, ", "))
+		case !strings.HasPrefix(p.Upstream, "http://") && !strings.HasPrefix(p.Upstream, "https://"):
+			fail("llm: provider %q: upstream must be an http(s) URL", p.Name)
+		}
+		seen[p.Name] = true
+	}
+}
+
+// LLMEnv is the environment pointing a command source's SDKs at the LLM
+// proxy. Variables the source sets itself are left alone.
+func (c *Config) LLMEnv(src Source) []string {
+	if c.LLM == nil || !*c.LLM.SetEnv || src.Command == "" {
+		return nil
+	}
+	var env []string
+	for _, p := range c.LLM.Providers {
+		if _, own := src.Env[p.Env]; p.Env != "" && !own {
+			env = append(env, p.Env+"="+c.LLM.URL()+"/"+p.Name)
+		}
+	}
+	return env
+}
+
+// URL is where the LLM proxy can be reached.
+func (l *LLM) URL() string {
+	host := l.Listen
+	if strings.HasPrefix(host, ":") {
+		host = "localhost" + host
+	}
+	return "http://" + host
 }
 
 func (c *Config) Source(name string) (Source, bool) {
