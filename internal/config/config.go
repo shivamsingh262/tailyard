@@ -4,6 +4,7 @@ package config
 import (
 	"errors"
 	"fmt"
+	"net"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -419,8 +420,8 @@ func (c *Config) normalizeLLM(l *LLM, fail func(string, ...any)) {
 	if l.Listen == "" {
 		l.Listen = "127.0.0.1:8898"
 	}
-	if c.Proxy != nil && l.Listen == c.Proxy.Listen {
-		fail("llm: listen %s is already the proxy's address", l.Listen)
+	if c.Proxy != nil && sameAddress(l.Listen, c.Proxy.Listen) {
+		fail("llm: listen %s clashes with the proxy's address %s", l.Listen, c.Proxy.Listen)
 	}
 	if l.SetEnv == nil {
 		l.SetEnv = ptr(true)
@@ -439,7 +440,7 @@ func (c *Config) normalizeLLM(l *LLM, fail func(string, ...any)) {
 	if len(l.Providers) == 0 {
 		l.Providers = []LLMProvider{{Name: "anthropic"}, {Name: "openai"}}
 	}
-	seen := map[string]bool{}
+	seen, envs := map[string]bool{}, map[string]string{}
 	for i := range l.Providers {
 		p := &l.Providers[i]
 		known := knownProviders[p.Name]
@@ -465,9 +466,26 @@ func (c *Config) normalizeLLM(l *LLM, fail func(string, ...any)) {
 			fail("llm: provider %q: api must be one of %s", p.Name, strings.Join(LLMAPIs, ", "))
 		case !strings.HasPrefix(p.Upstream, "http://") && !strings.HasPrefix(p.Upstream, "https://"):
 			fail("llm: provider %q: upstream must be an http(s) URL", p.Name)
+		case p.Env != "" && envs[p.Env] != "":
+			fail("llm: providers %q and %q both set %s; give one of them another env, or env: \"-\"", envs[p.Env], p.Name, p.Env)
 		}
 		seen[p.Name] = true
+		if p.Env != "" && envs[p.Env] == "" {
+			envs[p.Env] = p.Name
+		}
 	}
+}
+
+// sameAddress reports whether two listen addresses would bind the same port:
+// the same port with the same host, or with either one on all interfaces.
+func sameAddress(a, b string) bool {
+	ha, pa, errA := net.SplitHostPort(a)
+	hb, pb, errB := net.SplitHostPort(b)
+	if errA != nil || errB != nil {
+		return a == b
+	}
+	wild := func(h string) bool { return h == "" || h == "0.0.0.0" || h == "::" }
+	return pa == pb && (ha == hb || wild(ha) || wild(hb))
 }
 
 // LLMEnv is the environment pointing a command source's SDKs at the LLM

@@ -47,9 +47,26 @@ func (c *LLMCall) Refused() bool {
 }
 
 // Rerouted reports whether a different model answered than the one asked
-// for. Dated variants (gpt-4o answered by gpt-4o-2024-08-06) don't count.
+// for. Dated variants (gpt-4o answered by gpt-4o-2024-08-06), "-latest"
+// aliases and router prefixes (openai/gpt-4o) don't count.
 func (c *LLMCall) Rerouted() bool {
-	return c.Model != "" && c.Served != "" && !strings.HasPrefix(c.Served, c.Model)
+	if c.Model == "" || c.Served == "" {
+		return false
+	}
+	base := func(m string) string {
+		if i := strings.LastIndex(m, "/"); i >= 0 {
+			m = m[i+1:]
+		}
+		return strings.TrimSuffix(m, "-latest")
+	}
+	asked, served := base(c.Model), base(c.Served)
+	return !strings.HasPrefix(served, asked) && !strings.HasPrefix(asked, served)
+}
+
+// Failed reports whether the call didn't produce an answer: an HTTP error,
+// no response at all, or an error sent inside a successful stream.
+func (c *LLMCall) Failed() bool {
+	return c.Status >= 400 || c.Status == 0 || c.Error != ""
 }
 
 // Problems lists what deserves attention, most serious first.
@@ -60,7 +77,7 @@ func (c *LLMCall) Problems() []string {
 		out = append(out, "rate limited")
 	case c.Status == 529:
 		out = append(out, "overloaded")
-	case c.Status >= 400 || c.Status == 0:
+	case c.Failed():
 		out = append(out, "failed")
 	}
 	if c.Truncated() {
@@ -107,7 +124,7 @@ func LLMLine(e LLMEntry, corr *Correlator) Line {
 	l := Line{Src: "llm", Time: e.Time, Level: LInfo, LLM: &c, Corr: e.Corr}
 	problems := c.Problems()
 	switch {
-	case c.Status == 0 || c.Status >= 400 && c.Status != 429 && c.Status != 529:
+	case c.Failed() && c.Status != 429 && c.Status != 529:
 		l.Level = LError
 	case len(problems) > 0:
 		l.Level = LWarn

@@ -186,7 +186,31 @@ llm:
 	if err == nil {
 		t.Fatal("expected errors")
 	}
-	for _, want := range []string{"already the proxy's address", `provider "mine": api must be one of`, `"anthropic" is defined twice`, "can't contain"} {
+	for _, want := range []string{"clashes with the proxy's address", `provider "mine": api must be one of`, `"anthropic" is defined twice`, "can't contain"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error missing %q:\n%v", want, err)
+		}
+	}
+}
+
+func TestLLMEnvAndAddressClashes(t *testing.T) {
+	_, err := Parse([]byte(`
+proxy:
+  target: http://localhost:3000
+  listen: 127.0.0.1:8899
+llm:
+  listen: 0.0.0.0:8899
+  providers:
+    - name: openai
+    - name: azure
+      api: openai
+      upstream: https://example.openai.azure.com/openai/v1
+      env: OPENAI_BASE_URL
+`), "/w")
+	if err == nil {
+		t.Fatal("expected errors")
+	}
+	for _, want := range []string{"clashes with the proxy's address", `providers "openai" and "azure" both set OPENAI_BASE_URL`} {
 		if !strings.Contains(err.Error(), want) {
 			t.Errorf("error missing %q:\n%v", want, err)
 		}

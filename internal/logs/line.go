@@ -9,6 +9,7 @@ import (
 	"regexp"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/shivamsingh262/tailyard/internal/theme"
 )
@@ -122,11 +123,19 @@ func CompactValue(v any, max int) string {
 		_ = enc.Encode(t)
 		s = strings.TrimSpace(buf.String())
 	}
-	s = strings.ReplaceAll(s, "\n", "⏎")
-	if len(s) > max {
-		s = s[:max] + "…"
+	return CutUTF8(strings.ReplaceAll(s, "\n", "⏎"), max)
+}
+
+// CutUTF8 shortens s to at most max bytes without splitting a character,
+// adding "…" when it cut.
+func CutUTF8(s string, max int) string {
+	if len(s) <= max {
+		return s
 	}
-	return s
+	for max > 0 && !utf8.RuneStart(s[max]) {
+		max--
+	}
+	return s[:max] + "…"
 }
 
 func HumanBytes(n int64) string {

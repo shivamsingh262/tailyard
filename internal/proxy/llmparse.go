@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"strings"
 	"time"
+
+	"github.com/shivamsingh262/tailyard/internal/logs"
 )
 
 // maxAnswerText caps the assembled answer kept for display.
@@ -23,8 +25,8 @@ type llmState struct {
 	tools      []string
 	text       strings.Builder
 	firstToken time.Time
-	events     int
 	gotUsage   bool
+	refused    bool // a refusal arrived; a later "completed" status doesn't undo it
 }
 
 func newLLMState(api string) *llmState {
@@ -39,7 +41,7 @@ func (s *llmState) addText(t string, at time.Time) {
 		s.firstToken = at
 	}
 	if room := maxAnswerText - s.text.Len(); room > 0 {
-		s.text.WriteString(t[:min(len(t), room)])
+		s.text.WriteString(logs.CutUTF8(t, room))
 	}
 }
 
@@ -55,7 +57,6 @@ func (s *llmState) addTool(name string, at time.Time) {
 
 // absorb takes one decoded JSON object: a whole response or one stream event.
 func (s *llmState) absorb(v map[string]any, at time.Time) {
-	s.events++
 	if e, ok := v["error"].(map[string]any); ok {
 		s.errMsg = str(e, "message")
 		if t := str(e, "type"); t != "" && s.errMsg != "" {
@@ -131,6 +132,10 @@ func (s *llmState) absorbOpenAI(v map[string]any, at time.Time) {
 	case typ == "response.output_text.delta":
 		s.addText(str(v, "delta"), at)
 		return
+	case typ == "response.refusal.delta":
+		s.addText(str(v, "delta"), at)
+		s.refused, s.stop = true, "refusal"
+		return
 	case typ == "response.output_item.added":
 		if item := obj(v, "item"); str(item, "type") == "function_call" {
 			s.addTool(str(item, "name"), at)
@@ -162,6 +167,9 @@ func (s *llmState) absorbOpenAI(v map[string]any, at time.Time) {
 		s.addText(str(msg, "content"), at)
 		if r := str(msg, "refusal"); r != "" {
 			s.addText(r, at)
+			s.refused = true
+		}
+		if s.refused {
 			s.stop = "refusal"
 		}
 		for _, tc := range list(msg, "tool_calls") {
@@ -204,13 +212,16 @@ func (s *llmState) openAIResponse(r map[string]any, at time.Time, streamed bool)
 					p := asObj(part)
 					s.addText(str(p, "text")+str(p, "refusal"), at)
 					if str(p, "type") == "refusal" {
-						s.stop = "refusal"
+						s.refused = true
 					}
 				}
 			case "function_call":
 				s.addTool(str(it, "name"), at)
 			}
 		}
+	}
+	if s.refused {
+		s.stop = "refusal"
 	}
 	if u := obj(r, "usage"); u != nil {
 		s.gotUsage = true
@@ -280,11 +291,12 @@ func (p *sseParser) Close() {
 // llmRequest is what tailyard reads from a request body.
 type llmRequest struct {
 	model     string
-	stream    bool
 	maxTokens int64
 	prompt    string
-	streamUse bool // OpenAI chat: stream_options.include_usage
 }
+
+// toolResults stands in for the prompt when the call sends tool output back.
+const toolResults = "↩ tool results"
 
 func parseLLMRequest(body []byte) llmRequest {
 	v := decodeObject(body)
@@ -292,8 +304,6 @@ func parseLLMRequest(body []byte) llmRequest {
 		return llmRequest{}
 	}
 	r := llmRequest{model: str(v, "model")}
-	r.stream, _ = v["stream"].(bool)
-	r.streamUse, _ = obj(v, "stream_options")["include_usage"].(bool)
 	for _, k := range []string{"max_tokens", "max_completion_tokens", "max_output_tokens"} {
 		if n, ok := num(v, k); ok {
 			r.maxTokens = n
@@ -306,14 +316,37 @@ func parseLLMRequest(body []byte) llmRequest {
 	} else if len(msgs) == 0 {
 		msgs = list(v, "input")
 	}
+	// In a tool loop the newest turn carries tool output, not a question;
+	// say so rather than repeat the question from turns ago.
+	if n := len(msgs); n > 0 && r.prompt == "" && isToolResult(asObj(msgs[n-1])) {
+		r.prompt = toolResults
+	}
 	for i := len(msgs) - 1; i >= 0 && r.prompt == ""; i-- {
-		m := asObj(msgs[i])
-		if str(m, "role") == "user" {
+		if m := asObj(msgs[i]); str(m, "role") == "user" {
 			r.prompt = contentText(m["content"])
 		}
 	}
-	r.prompt = oneLine(r.prompt, 200)
+	r.prompt = logs.CutUTF8(strings.Join(strings.Fields(r.prompt), " "), 200)
 	return r
+}
+
+// isToolResult reports whether a message returns tool output: an OpenAI
+// "tool" message or function_call_output item, or an Anthropic user turn
+// made only of tool_result blocks.
+func isToolResult(m map[string]any) bool {
+	if str(m, "role") == "tool" || str(m, "type") == "function_call_output" {
+		return true
+	}
+	blocks := asList(m["content"])
+	if str(m, "role") != "user" || len(blocks) == 0 {
+		return false
+	}
+	for _, b := range blocks {
+		if str(asObj(b), "type") != "tool_result" {
+			return false
+		}
+	}
+	return true
 }
 
 // contentText is the text of a message's content: a string, or the text
@@ -329,14 +362,6 @@ func contentText(c any) string {
 		}
 	}
 	return strings.Join(parts, " ")
-}
-
-func oneLine(s string, max int) string {
-	s = strings.Join(strings.Fields(s), " ")
-	if len(s) > max {
-		s = s[:max] + "…"
-	}
-	return s
 }
 
 func decodeObject(data []byte) map[string]any {

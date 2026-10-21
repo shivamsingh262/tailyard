@@ -133,8 +133,8 @@ func (p *LLMProxy) headerCorr(h http.Header) string {
 
 func (p *LLMProxy) modifyResponse(resp *http.Response) error {
 	c, _ := resp.Request.Context().Value(llmCtxKey{}).(*llmCapture)
-	if c == nil {
-		return nil
+	if c == nil || resp.StatusCode == http.StatusSwitchingProtocols {
+		return nil // WebSockets (realtime APIs) are forwarded, not recorded
 	}
 	state := newLLMState(c.route.provider.API)
 	var once sync.Once
@@ -169,8 +169,8 @@ func (p *LLMProxy) errorHandler(w http.ResponseWriter, r *http.Request, err erro
 		_, _ = fmt.Fprintf(w, "tailyard llm proxy: %s unreachable: %v\n", upstream, err)
 	}
 	if c != nil {
-		call := p.call(c, http.StatusBadGateway, newLLMState(c.route.provider.API), false)
-		call.Status, call.Error = status, err.Error()
+		call := p.call(c, status, newLLMState(c.route.provider.API), false)
+		call.Error = err.Error()
 		p.emit(logs.LLMLine(logs.LLMEntry{Call: call, Time: c.start, ReqBody: p.display(c.reqBody), Corr: c.corr}, p.corr))
 	}
 }
@@ -178,11 +178,12 @@ func (p *LLMProxy) errorHandler(w http.ResponseWriter, r *http.Request, err erro
 func (p *LLMProxy) record(c *llmCapture, resp *http.Response, state *llmState, raw *cappedBuffer, streamed bool) {
 	var note string
 	if raw != nil {
+		data, total := raw.snapshot()
 		switch {
-		case raw.truncated():
+		case total > int64(len(data)):
 			note = "response larger than max_body; not parsed"
-		case raw.total > 0:
-			if v := decodeObject(raw.buf.Bytes()); v != nil {
+		case total > 0:
+			if v := decodeObject(data); v != nil {
 				state.absorb(v, time.Now())
 			}
 		}
@@ -206,8 +207,8 @@ func (p *LLMProxy) record(c *llmCapture, resp *http.Response, state *llmState, r
 // call builds the normalized record from the request and what the response said.
 func (p *LLMProxy) call(c *llmCapture, status int, state *llmState, streamed bool) logs.LLMCall {
 	var req llmRequest
-	if !c.reqBody.truncated() {
-		req = parseLLMRequest(c.reqBody.buf.Bytes())
+	if data, total := c.reqBody.snapshot(); total == int64(len(data)) {
+		req = parseLLMRequest(data)
 	}
 	call := logs.LLMCall{
 		Provider:     c.route.provider.Name,

@@ -39,6 +39,7 @@ type App struct {
 
 	closing atomic.Bool
 	busy    atomic.Bool
+	llmUp   atomic.Bool // the LLM proxy is listening; only then do commands get its env
 	HungUp  atomic.Bool // the terminal closed; nothing can be printed
 
 	mu       sync.Mutex
@@ -645,17 +646,25 @@ func (a *App) Shutdown(stopContainers bool) {
 func (a *App) startLLM() {
 	l := a.Cfg.LLM
 	if err := a.LLM.Start(); err != nil {
-		a.emit(logs.LError, "llm proxy: "+err.Error())
+		a.emit(logs.LError, "llm proxy: "+err.Error()+"; command sources start without its base URLs")
 		return
 	}
+	a.llmUp.Store(true)
 	var routes []string
 	for _, p := range l.Providers {
 		routes = append(routes, fmt.Sprintf("%s/%s → %s", l.URL(), p.Name, p.Upstream))
 	}
 	a.emit(logs.LInfo, "llm proxy listening: "+strings.Join(routes, ", "))
 	for _, p := range l.Providers {
-		if p.Env != "" && *l.SetEnv && os.Getenv(p.Env) != "" {
-			a.emit(logs.LWarn, fmt.Sprintf("llm proxy: %s is already set in your environment, so %s calls from command sources keep going to %s", p.Env, p.Name, os.Getenv(p.Env)))
+		if p.Env == "" || !*l.SetEnv || os.Getenv(p.Env) == "" {
+			continue
+		}
+		// Warn only if some command source would otherwise have been routed.
+		for _, src := range a.Cfg.Sources {
+			if _, own := src.Env[p.Env]; src.Command != "" && !own {
+				a.emit(logs.LWarn, fmt.Sprintf("llm proxy: %s is already set in your environment, so %s calls from command sources keep going to %s", p.Env, p.Name, os.Getenv(p.Env)))
+				break
+			}
 		}
 	}
 	for _, src := range a.Cfg.Sources {
@@ -669,6 +678,9 @@ func (a *App) startLLM() {
 // llmEnv points a command source's LLM SDKs at the LLM proxy, unless the
 // variable is already set in tailyard's own environment.
 func (a *App) llmEnv(src config.Source) []string {
+	if !a.llmUp.Load() {
+		return nil
+	}
 	var env []string
 	for _, kv := range a.Cfg.LLMEnv(src) {
 		name, _, _ := strings.Cut(kv, "=")

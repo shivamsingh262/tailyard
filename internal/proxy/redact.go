@@ -22,14 +22,18 @@ func sensitive(key string, redact []string) bool {
 	return false
 }
 
-// isTokenCount reports whether a key holds a count of LLM tokens
-// (max_tokens, input_tokens, promptTokenCount) rather than a credential.
-func isTokenCount(k string) bool {
-	if strings.Contains(k, "access") || strings.Contains(k, "refresh") || strings.Contains(k, "id_token") {
-		return false
-	}
-	return strings.HasSuffix(k, "tokens") || strings.HasSuffix(k, "tokencount") || strings.HasSuffix(k, "token_count")
+// tokenCounts are LLM API fields that count tokens. They match the default
+// "token" redaction but hold no secret, and hiding them hides what matters.
+var tokenCounts = map[string]bool{
+	"max_tokens": true, "max_completion_tokens": true, "max_output_tokens": true, "maxoutputtokens": true,
+	"input_tokens": true, "output_tokens": true, "total_tokens": true, "reasoning_tokens": true,
+	"prompt_tokens": true, "completion_tokens": true, "cached_tokens": true,
+	"cache_read_input_tokens": true, "cache_creation_input_tokens": true,
+	"prompttokencount": true, "candidatestokencount": true, "totaltokencount": true, "cachedcontenttokencount": true,
 }
+
+// isTokenCount reports whether a lowercase key is a known token count.
+func isTokenCount(k string) bool { return tokenCounts[k] }
 
 // redactJSON masks values under sensitive keys at any depth. Bodies that
 // don't decode (truncated ones) are returned as they are.

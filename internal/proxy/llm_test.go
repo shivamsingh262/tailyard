@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/shivamsingh262/tailyard/internal/config"
 	"github.com/shivamsingh262/tailyard/internal/logs"
@@ -222,10 +223,96 @@ func TestLLMUpstreamDown(t *testing.T) {
 }
 
 func TestTokenCountsAreNotSecrets(t *testing.T) {
-	got := redactJSON([]byte(`{"max_tokens":5,"usage":{"input_tokens":3},"promptTokenCount":2,"token":"t","access_tokens":["a"]}`), []string{"token"})
-	for _, want := range []string{`"max_tokens":5`, `"input_tokens":3`, `"promptTokenCount":2`, `"token":"[redacted]"`, `"access_tokens":"[redacted]"`} {
+	got := redactJSON([]byte(`{"max_tokens":5,"usage":{"input_tokens":3},"promptTokenCount":2,"token":"t","access_tokens":["a"],"device_tokens":["d"],"tokens":{"access":"x"}}`), []string{"token"})
+	for _, want := range []string{`"max_tokens":5`, `"input_tokens":3`, `"promptTokenCount":2`, `"token":"[redacted]"`, `"access_tokens":"[redacted]"`, `"device_tokens":"[redacted]"`, `"tokens":"[redacted]"`} {
 		if !strings.Contains(got, want) {
 			t.Errorf("want %s in %s", want, got)
 		}
+	}
+}
+
+func TestLLMForwardsWebSockets(t *testing.T) {
+	url, s := newTestLLMProxy(t, "openai", func(w http.ResponseWriter, r *http.Request) {
+		conn, rw, err := w.(http.Hijacker).Hijack()
+		if err != nil {
+			t.Error(err)
+			return
+		}
+		defer conn.Close()
+		_, _ = rw.WriteString("HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n\r\n")
+		_ = rw.Flush()
+		line, _ := rw.ReadString('\n')
+		_, _ = rw.WriteString("echo " + line)
+		_ = rw.Flush()
+	})
+	req, _ := http.NewRequest("GET", url+"/realtime", nil)
+	req.Header.Set("Connection", "Upgrade")
+	req.Header.Set("Upgrade", "websocket")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusSwitchingProtocols {
+		t.Fatalf("status = %d, want 101", resp.StatusCode)
+	}
+	rw := resp.Body.(io.ReadWriter)
+	_, _ = io.WriteString(rw, "hello\n")
+	got, _ := bufio.NewReader(rw).ReadString('\n')
+	if got != "echo hello\n" {
+		t.Errorf("got %q through the upgraded connection", got)
+	}
+	time.Sleep(50 * time.Millisecond)
+	if len(s.lines) != 0 {
+		t.Errorf("a WebSocket shouldn't be recorded as a call: %+v", s.lines[0].LLM)
+	}
+}
+
+func TestLLMStreamedResponsesRefusal(t *testing.T) {
+	url, s := newTestLLMProxy(t, "openai", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		for _, d := range []string{
+			`{"type":"response.created","response":{"model":"gpt-5.1","status":"in_progress"}}`,
+			`{"type":"response.refusal.delta","delta":"I can't help with that."}`,
+			`{"type":"response.completed","response":{"model":"gpt-5.1","status":"completed","usage":{"input_tokens":10,"output_tokens":6}}}`,
+		} {
+			_, _ = io.WriteString(w, "data: "+d+"\n\n")
+		}
+	})
+	post(t, url+"/responses", `{"model":"gpt-5.1","stream":true,"input":"x"}`)
+	l := s.wait(t, 1)[0]
+	if !l.LLM.Refused() || l.Level != logs.LWarn || !strings.Contains(strings.Join(l.Detail, "\n"), "can't help") {
+		t.Errorf("refusal not detected: %+v", l.LLM)
+	}
+}
+
+func TestLLMErrorInsideStream(t *testing.T) {
+	url, s := newTestLLMProxy(t, "anthropic", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = io.WriteString(w, "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"model\":\"claude-opus-5-5\",\"usage\":{\"input_tokens\":5}}}\n\n")
+		_, _ = io.WriteString(w, "event: error\ndata: {\"type\":\"error\",\"error\":{\"type\":\"overloaded_error\",\"message\":\"Overloaded\"}}\n\n")
+	})
+	post(t, url+"/v1/messages", `{"model":"claude-opus-5-5","stream":true,"messages":[]}`)
+	l := s.wait(t, 1)[0]
+	if l.LLM.Status != 200 || !l.LLM.Failed() || l.Level != logs.LError {
+		t.Errorf("an error event must flag the call: %+v level %v", l.LLM, l.Level)
+	}
+}
+
+func TestParseLLMRequestPrompt(t *testing.T) {
+	cases := map[string]string{
+		`{"messages":[{"role":"user","content":"Why?"},{"role":"assistant","content":[{"type":"tool_use"}]},{"role":"user","content":[{"type":"tool_result","content":"42"}]}]}`: toolResults,
+		`{"messages":[{"role":"user","content":"Why?"},{"role":"assistant","tool_calls":[{}]},{"role":"tool","content":"42"}]}`:                                                  toolResults,
+		`{"input":[{"role":"user","content":"Why?"},{"type":"function_call_output","output":"42"}]}`:                                                                             toolResults,
+		`{"messages":[{"role":"system","content":"s"},{"role":"user","content":[{"type":"text","text":"a\n  b"}]}]}`:                                                             "a b",
+	}
+	for body, want := range cases {
+		if got := parseLLMRequest([]byte(body)).prompt; got != want {
+			t.Errorf("prompt = %q, want %q for %s", got, want, body)
+		}
+	}
+	long := `{"messages":[{"role":"user","content":"` + strings.Repeat("é", 150) + `"}]}`
+	if got := parseLLMRequest([]byte(long)).prompt; !utf8.ValidString(got) || !strings.HasSuffix(got, "…") {
+		t.Errorf("prompt cut inside a character: %q", got)
 	}
 }

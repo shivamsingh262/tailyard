@@ -62,6 +62,8 @@ func llmOutcome(c *logs.LLMCall) string {
 	switch {
 	case c.Status >= 400 || c.Status == 0:
 		return theme.Status(c.Status).Render(fmt.Sprint(c.Status))
+	case c.Error != "":
+		return theme.ErrB.Render("error")
 	case c.Truncated(), c.Refused():
 		return theme.WarnB.Render(c.Stop)
 	case c.Stop == "":
@@ -79,6 +81,9 @@ func renderLLM(c *logs.LLMCall, modelWidth int) string {
 	if model == "" {
 		model = "?"
 	}
+	if modelWidth > 0 {
+		model = ansi.Truncate(model, modelWidth, "…")
+	}
 	var b strings.Builder
 	b.WriteString(theme.Source("llm").Render(fmt.Sprintf("%-9s", ansi.Truncate(c.Provider, 9, "…"))) + " ")
 	b.WriteString(model + strings.Repeat(" ", max(modelWidth-ansi.StringWidth(model), 0)) + "  ")
@@ -95,18 +100,12 @@ func renderLLM(c *logs.LLMCall, modelWidth int) string {
 		b.WriteString(theme.Dim.Render(fmt.Sprintf(" %8s", logs.Dollars(c.Cost))))
 	}
 	var tail []string
-	problems := c.Problems()
-	if c.Truncated() || c.Refused() {
-		problems = problems[1:] // already shown as the outcome
+	if c.Error != "" {
+		tail = append(tail, theme.Err.Render(c.Error))
 	}
-	if c.Status >= 400 {
-		if c.Error != "" {
-			tail = append(tail, theme.Err.Render(c.Error))
-		}
-		problems = nil
-	}
-	for _, p := range problems {
-		tail = append(tail, theme.WarnB.Render(p))
+	// The outcome column already shows failures, truncation and refusals.
+	if c.Rerouted() {
+		tail = append(tail, theme.WarnB.Render("answered by "+c.Served))
 	}
 	if len(c.Tools) > 0 {
 		tail = append(tail, theme.Accent.Render("→ "+strings.Join(c.Tools, ", ")))
@@ -120,7 +119,8 @@ func renderLLM(c *logs.LLMCall, modelWidth int) string {
 	return b.String()
 }
 
-// llmModelWidth is the display width of a call's model column.
+// llmModelWidth is the display width of a call's model column, capped so
+// one long router model name doesn't push every row's columns right.
 func llmModelWidth(c *logs.LLMCall) int {
-	return max(ansi.StringWidth(c.Model), 1)
+	return min(max(ansi.StringWidth(c.Model), 1), 28)
 }

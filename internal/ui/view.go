@@ -191,12 +191,14 @@ func (m *Model) stampOf(l logs.Line) string {
 
 // entryText is an entry's message: request rows are laid out in columns,
 // everything else uses its pre-styled Text.
-func entryText(l logs.Line, pathWidth int) string {
+// pathWidth pads request paths and modelWidth LLM model names, so each kind
+// of row lines up with its own kind.
+func entryText(l logs.Line, pathWidth, modelWidth int) string {
 	switch {
 	case l.Req != nil:
 		return renderRequest(l.Req, pathWidth)
 	case l.LLM != nil:
-		return renderLLM(l.LLM, pathWidth)
+		return renderLLM(l.LLM, modelWidth)
 	}
 	return l.Text
 }
@@ -231,7 +233,7 @@ func highlight(row string, width int) string {
 	return bg + row + strings.Repeat(" ", max(width-ansi.StringWidth(row), 0)) + "\x1b[0m"
 }
 
-func (m *Model) renderLine(t *tab, l logs.Line, width, pathWidth int, selected, showStamp bool) []string {
+func (m *Model) renderLine(t *tab, l logs.Line, width, pathWidth, modelWidth int, selected, showStamp bool) []string {
 	stamp := m.stampOf(l)
 	if !showStamp {
 		stamp = strings.Repeat(" ", len(stamp))
@@ -244,7 +246,7 @@ func (m *Model) renderLine(t *tab, l logs.Line, width, pathWidth int, selected, 
 	if t.multi {
 		row += theme.Source(l.Src).Render(fmt.Sprintf("%-9s", ansi.Truncate(l.Src, 9, "…"))) + " "
 	}
-	text := entryText(l, pathWidth)
+	text := entryText(l, pathWidth, modelWidth)
 	if l.Req == nil && l.LLM == nil {
 		row += levelBadge(l.Level) + " "
 	} else if l.Level == logs.LDebug {
@@ -281,7 +283,7 @@ func (m *Model) bodyRows(width, height int) []string {
 		selected bool
 	}
 	var entries []shown // newest first
-	used, skipped, pathWidth := 0, 0, 0
+	used, skipped, pathWidth, modelWidth := 0, 0, 0, 0
 	for i := len(t.buf) - 1; i >= 0 && used < height; i-- {
 		l := t.buf[i]
 		if !m.matches(t, l) {
@@ -297,7 +299,7 @@ func (m *Model) bodyRows(width, height int) []string {
 			pathWidth = max(pathWidth, min(requestPathWidth(l.Req), 40))
 		}
 		if l.LLM != nil {
-			pathWidth = max(pathWidth, min(llmModelWidth(l.LLM), 28))
+			modelWidth = max(modelWidth, llmModelWidth(l.LLM))
 		}
 	}
 	t.visible = len(entries)
@@ -314,7 +316,7 @@ func (m *Model) bodyRows(width, height int) []string {
 	for i := len(entries) - 1; i >= 0; i-- {
 		l := t.buf[entries[i].idx]
 		stamp := m.stampOf(l)
-		rows = append(rows, m.renderLine(t, l, width, pathWidth, entries[i].selected, stamp != prevStamp || entries[i].selected)...)
+		rows = append(rows, m.renderLine(t, l, width, pathWidth, modelWidth, entries[i].selected, stamp != prevStamp || entries[i].selected)...)
 		prevStamp = stamp
 	}
 	if len(rows) > height {
@@ -525,7 +527,7 @@ func (m *Model) helpRows() []string {
 		section("Reading entries"),
 		key("i  enter", "open the selected entry full-screen: request + response, tracebacks, payloads"),
 		key("", "inside: n / p older / newer entry, y copy it, esc close"),
-		key("s", fmt.Sprintf("split view: list + detail pane (terminals ≥ %d columns; on in HTTP)", splitMinWidth)),
+		key("s", fmt.Sprintf("split view: list + detail pane (terminals ≥ %d columns; on in HTTP and LLM)", splitMinWidth)),
 		key("J K", "scroll the detail pane"),
 		key("t", fmt.Sprintf("expand details inline (first %d lines each)", inlineDetailLines)),
 		"",

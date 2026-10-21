@@ -213,7 +213,8 @@ func (p *Proxy) record(c *capture, resp *http.Response, res *cappedBuffer, note 
 	e := p.entry(c)
 	e.Status, e.ResType, e.Note = resp.StatusCode, resp.Header.Get("Content-Type"), note
 	if res != nil {
-		e.Size, e.Truncated = res.total, res.truncated()
+		_, e.Size = res.snapshot()
+		e.Truncated = res.truncated()
 		e.ResBody = displayBody(res, e.ResType, resp.Header.Get("Content-Encoding"), p.cfg.Redact)
 	}
 	p.emit(logs.HTTPLine(e, p.corr))
@@ -265,15 +266,18 @@ func injectScript(resp *http.Response) error {
 // displayBody turns a captured body into text for the TUI: decoded,
 // redacted, or a note when it isn't text.
 func displayBody(b *cappedBuffer, contentType, encoding string, redact []string) string {
-	if b == nil || b.total == 0 {
+	if b == nil {
 		return ""
 	}
-	data := b.buf.Bytes()
+	data, total := b.snapshot()
+	if total == 0 {
+		return ""
+	}
 	switch encoding {
 	case "":
 	case "gzip":
-		if b.truncated() {
-			return fmt.Sprintf("(gzip body, %s, truncated: not decoded)", logs.HumanBytes(b.total))
+		if total > int64(len(data)) {
+			return fmt.Sprintf("(gzip body, %s, truncated: not decoded)", logs.HumanBytes(total))
 		}
 		zr, err := gzip.NewReader(bytes.NewReader(data))
 		if err != nil {
@@ -283,13 +287,13 @@ func displayBody(b *cappedBuffer, contentType, encoding string, redact []string)
 			return "(gzip body that failed to decode)"
 		}
 	default:
-		return fmt.Sprintf("(%s-encoded body, %s: not decoded)", encoding, logs.HumanBytes(b.total))
+		return fmt.Sprintf("(%s-encoded body, %s: not decoded)", encoding, logs.HumanBytes(total))
 	}
 	switch {
 	case strings.HasPrefix(contentType, "multipart/"):
-		return fmt.Sprintf("(multipart body, %s)", logs.HumanBytes(b.total))
+		return fmt.Sprintf("(multipart body, %s)", logs.HumanBytes(total))
 	case !isText(contentType, data):
-		return fmt.Sprintf("(binary body, %s)", logs.HumanBytes(b.total))
+		return fmt.Sprintf("(binary body, %s)", logs.HumanBytes(total))
 	case strings.Contains(contentType, "x-www-form-urlencoded"):
 		return redactForm(string(data), redact)
 	case strings.Contains(contentType, "json") || json.Valid(data):
@@ -309,20 +313,36 @@ func isText(contentType string, data []byte) bool {
 }
 
 // cappedBuffer keeps the first max bytes written to it and counts the rest.
+// It is locked because a request body can still be streaming upstream when
+// the response, which reads it, comes back.
 type cappedBuffer struct {
+	mu    sync.Mutex
 	buf   bytes.Buffer
 	max   int64
 	total int64
 }
 
 func (c *cappedBuffer) Write(p []byte) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	if room := c.max - int64(c.buf.Len()); room > 0 {
 		c.buf.Write(p[:min(int64(len(p)), room)])
 	}
 	c.total += int64(len(p))
 }
 
-func (c *cappedBuffer) truncated() bool { return c.total > int64(c.buf.Len()) }
+// snapshot returns a copy of what was kept and the total written so far.
+func (c *cappedBuffer) snapshot() (data []byte, total int64) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return bytes.Clone(c.buf.Bytes()), c.total
+}
+
+func (c *cappedBuffer) truncated() bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.total > int64(c.buf.Len())
+}
 
 // teeBody copies what is read through it into buf and calls done once the
 // body is finished: at EOF, on a read error, or when closed early.
