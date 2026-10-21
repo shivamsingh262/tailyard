@@ -84,6 +84,7 @@ type Model struct {
 	flash      string
 	flashUntil time.Time
 	started    time.Time
+	llm        llmTotals
 
 	// StopOnQuit is read after the program exits: q stops the containers,
 	// d detaches.
@@ -111,7 +112,7 @@ func New(a *app.App, stopOnQuit bool) *Model {
 		for _, s := range def.Sources {
 			t.srcs[s] = true
 		}
-		t.split = len(def.Sources) == 1 && def.Sources[0] == config.SrcHTTP
+		t.split = len(def.Sources) == 1 && (def.Sources[0] == config.SrcHTTP || def.Sources[0] == config.SrcLLM)
 		t.redis = t.srcs[config.SrcEvents] || t.srcs[config.SrcMonitor]
 		m.tabs = append(m.tabs, t)
 	}
@@ -175,6 +176,9 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 func (m *Model) addLine(l logs.Line) {
+	if l.LLM != nil {
+		m.llm.add(l.LLM)
+	}
 	if l.Corr != "" && (len(m.recentIDs) == 0 || m.recentIDs[0] != l.Corr) {
 		ids := []string{l.Corr}
 		for _, r := range m.recentIDs {

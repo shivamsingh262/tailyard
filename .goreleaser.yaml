@@ -56,7 +56,7 @@ homebrew_casks:
       token: "{{ .Env.HOMEBREW_TAP_GITHUB_TOKEN }}"
     directory: Casks
     homepage: https://github.com/shivamsingh262/tailyard
-    description: One terminal for your local dev stack's logs, HTTP traffic and Redis queues
+    description: One terminal for your local dev stack's logs, HTTP traffic, LLM calls and Redis queues
     license: MIT
     commit_author:
       name: goreleaserbot

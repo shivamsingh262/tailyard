@@ -55,6 +55,27 @@ proxy:
   # redact: [password, token, secret]   # key substrings to mask (a sensible default list applies)
   inject_console: true     # forward the browser console to a Browser tab (HTML pages only)
 
+# Records LLM API calls in an LLM tab: model, stop reason, tokens, cache hits,
+# time to first token and cost. Your SDKs send calls to http://<listen>/<provider>;
+# tailyard sets ANTHROPIC_BASE_URL and OPENAI_BASE_URL for the command sources
+# it starts, unless they're already set. Streams pass through unbuffered.
+llm:
+  listen: 127.0.0.1:8898   # 0.0.0.0:8898 to take calls from containers (host.docker.internal)
+  providers:               # default: anthropic, openai
+    - name: anthropic
+    - name: openai
+    # - name: ollama       # also openrouter, groq, together; or any OpenAI-compatible server:
+    # - name: vllm
+    #   api: openai
+    #   upstream: http://localhost:8000/v1
+    #   env: VLLM_BASE_URL
+  # set_env: false         # don't set the base-URL variables for command sources
+  # max_body: 2MB
+  # Cost per call, in USD per million tokens, by model or model prefix.
+  # Check your provider's pricing page; this one is from October 2026.
+  # prices:
+  #   claude-opus-5-5: {input: 4, output: 20, cache_read: 0.2, cache_write: 5}
+
 # Queue backlog, memory, key prefixes, MONITOR on `m`.
 redis:
   addr: 127.0.0.1:6379
@@ -72,11 +93,11 @@ correlation:
   keys: [request_id, trace_id]        # JSON log fields and query parameters
   # pattern: 'runs/([0-9a-f-]{36})'   # for plain text; group 1 is the id
 
-# tabs:                    # default: one per source, then HTTP, Browser, Redis, System, All
+# tabs:                    # default: one per source, then HTTP, Browser, LLM, Redis, System, All
 #   - name: Backend
 #     sources: [api, worker]
 #   - name: Everything
-#     sources: [api, worker, web, http, browser, events, tailyard]
+#     sources: [api, worker, web, http, browser, llm, events, tailyard]
 
 # Keys for things you do often. Each sets one of run (a shell command, run in
 # this folder), compose (docker compose arguments) or restart (a command source).

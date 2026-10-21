@@ -135,3 +135,24 @@ func TestOnURL(t *testing.T) {
 		t.Errorf("url = %q", url)
 	}
 }
+
+func TestLLMCallFlags(t *testing.T) {
+	cases := []struct {
+		asked, served string
+		rerouted      bool
+	}{
+		{"gpt-4o", "gpt-4o-2024-08-06", false},
+		{"claude-3-5-sonnet-latest", "claude-3-5-sonnet-20241022", false},
+		{"openai/gpt-4o", "gpt-4o-2024-08-06", false},
+		{"claude-opus-5-5", "claude-opus-4-8", true},
+	}
+	for _, c := range cases {
+		call := LLMCall{Model: c.asked, Served: c.served, Status: 200}
+		if call.Rerouted() != c.rerouted {
+			t.Errorf("Rerouted(%s → %s) = %v", c.asked, c.served, !c.rerouted)
+		}
+	}
+	if got := CutUTF8("ééé", 3); got != "é…" {
+		t.Errorf("CutUTF8 = %q", got)
+	}
+}

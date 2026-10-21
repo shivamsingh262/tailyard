@@ -91,6 +91,9 @@ func (m *Model) statusBar() string {
 	if len(services) > 0 {
 		parts = append(parts, strings.Join(services, "  "))
 	}
+	if badge := m.llm.badge(); badge != "" {
+		parts = append(parts, badge)
+	}
 	if badge := m.redisBadge(); badge != "" {
 		parts = append(parts, badge)
 	}
@@ -188,9 +191,14 @@ func (m *Model) stampOf(l logs.Line) string {
 
 // entryText is an entry's message: request rows are laid out in columns,
 // everything else uses its pre-styled Text.
-func entryText(l logs.Line, pathWidth int) string {
-	if l.Req != nil {
+// pathWidth pads request paths and modelWidth LLM model names, so each kind
+// of row lines up with its own kind.
+func entryText(l logs.Line, pathWidth, modelWidth int) string {
+	switch {
+	case l.Req != nil:
 		return renderRequest(l.Req, pathWidth)
+	case l.LLM != nil:
+		return renderLLM(l.LLM, modelWidth)
 	}
 	return l.Text
 }
@@ -225,7 +233,7 @@ func highlight(row string, width int) string {
 	return bg + row + strings.Repeat(" ", max(width-ansi.StringWidth(row), 0)) + "\x1b[0m"
 }
 
-func (m *Model) renderLine(t *tab, l logs.Line, width, pathWidth int, selected, showStamp bool) []string {
+func (m *Model) renderLine(t *tab, l logs.Line, width, pathWidth, modelWidth int, selected, showStamp bool) []string {
 	stamp := m.stampOf(l)
 	if !showStamp {
 		stamp = strings.Repeat(" ", len(stamp))
@@ -238,8 +246,8 @@ func (m *Model) renderLine(t *tab, l logs.Line, width, pathWidth int, selected, 
 	if t.multi {
 		row += theme.Source(l.Src).Render(fmt.Sprintf("%-9s", ansi.Truncate(l.Src, 9, "…"))) + " "
 	}
-	text := entryText(l, pathWidth)
-	if l.Req == nil {
+	text := entryText(l, pathWidth, modelWidth)
+	if l.Req == nil && l.LLM == nil {
 		row += levelBadge(l.Level) + " "
 	} else if l.Level == logs.LDebug {
 		text = theme.Dim.Render(ansi.Strip(text))
@@ -275,7 +283,7 @@ func (m *Model) bodyRows(width, height int) []string {
 		selected bool
 	}
 	var entries []shown // newest first
-	used, skipped, pathWidth := 0, 0, 0
+	used, skipped, pathWidth, modelWidth := 0, 0, 0, 0
 	for i := len(t.buf) - 1; i >= 0 && used < height; i-- {
 		l := t.buf[i]
 		if !m.matches(t, l) {
@@ -289,6 +297,9 @@ func (m *Model) bodyRows(width, height int) []string {
 		used += m.entryHeight(l)
 		if l.Req != nil {
 			pathWidth = max(pathWidth, min(requestPathWidth(l.Req), 40))
+		}
+		if l.LLM != nil {
+			modelWidth = max(modelWidth, llmModelWidth(l.LLM))
 		}
 	}
 	t.visible = len(entries)
@@ -305,7 +316,7 @@ func (m *Model) bodyRows(width, height int) []string {
 	for i := len(entries) - 1; i >= 0; i-- {
 		l := t.buf[entries[i].idx]
 		stamp := m.stampOf(l)
-		rows = append(rows, m.renderLine(t, l, width, pathWidth, entries[i].selected, stamp != prevStamp || entries[i].selected)...)
+		rows = append(rows, m.renderLine(t, l, width, pathWidth, modelWidth, entries[i].selected, stamp != prevStamp || entries[i].selected)...)
 		prevStamp = stamp
 	}
 	if len(rows) > height {
@@ -324,6 +335,8 @@ func (m *Model) emptyHint(t *tab) string {
 		return " — requests through " + m.app.Proxy.URL() + " show here"
 	case t.srcs[config.SrcBrowser] && len(t.srcs) == 1 && m.app.Proxy != nil:
 		return " — open the app through " + m.app.Proxy.URL() + "; its console shows here"
+	case t.srcs[config.SrcLLM] && len(t.srcs) == 1 && m.cfg.LLM != nil:
+		return " — LLM calls sent to " + m.cfg.LLM.URL() + "/<provider> show here"
 	}
 	return ""
 }
@@ -345,6 +358,9 @@ func (m *Model) detailRows(l logs.Line, width int) []string {
 		if l.Req.Ms >= 0 {
 			text += "  " + theme.Duration(l.Req.Ms).Render(fmt.Sprintf("%dms", l.Req.Ms))
 		}
+	}
+	if l.LLM != nil {
+		text = renderLLM(l.LLM, 0)
 	}
 	rows := []string{header}
 	rows = append(rows, strings.Split(ansi.Hardwrap(text, width, true), "\n")...)
@@ -511,7 +527,7 @@ func (m *Model) helpRows() []string {
 		section("Reading entries"),
 		key("i  enter", "open the selected entry full-screen: request + response, tracebacks, payloads"),
 		key("", "inside: n / p older / newer entry, y copy it, esc close"),
-		key("s", fmt.Sprintf("split view: list + detail pane (terminals ≥ %d columns; on in HTTP)", splitMinWidth)),
+		key("s", fmt.Sprintf("split view: list + detail pane (terminals ≥ %d columns; on in HTTP and LLM)", splitMinWidth)),
 		key("J K", "scroll the detail pane"),
 		key("t", fmt.Sprintf("expand details inline (first %d lines each)", inlineDetailLines)),
 		"",

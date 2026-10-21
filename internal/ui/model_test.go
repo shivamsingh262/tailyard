@@ -111,3 +111,32 @@ func TestErrorBadgeOnInactiveTab(t *testing.T) {
 		t.Error("switching to the tab should clear its badge")
 	}
 }
+
+func TestLLMTab(t *testing.T) {
+	cfg, err := config.Parse([]byte("llm:\n  providers: [{name: anthropic}]\n"), t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	a, err := app.New(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := New(a, false)
+	m.Update(tea.WindowSizeMsg{Width: 200, Height: 30})
+	now := time.Now()
+	call := func(stop string, status int, out int64) logs.Line {
+		return logs.LLMLine(logs.LLMEntry{Time: now, ResText: "an answer", Call: logs.LLMCall{
+			Provider: "anthropic", Model: "claude-opus-5-5", Served: "claude-opus-5-5", Status: status, Stop: stop,
+			InputTokens: 1200, OutputTokens: out, CacheRead: 10800, CacheWrite: 0, Ms: 4100, TTFTMs: 800, Cost: 0.0123,
+			Prompt: "Why did ROAS drop?",
+		}}, nil)
+	}
+	m.Update(linesMsg{call("end_turn", 200, 845), call("max_tokens", 200, 4096)})
+
+	view := ansi.Strip(m.View())
+	for _, want := range []string{"1 LLM", "llm 2 · 29k tok · $0.025 !1", "claude-opus-5-5", "end_turn", "12k→845", "90%c", "4.1s", "$0.012", "Why did ROAS drop?", "max_tokens", "first token 800ms", "an answer"} {
+		if !strings.Contains(view, want) {
+			t.Errorf("view missing %q:\n%s", want, view)
+		}
+	}
+}
